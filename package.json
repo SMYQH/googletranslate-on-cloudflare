@@ -1,0 +1,18 @@
+{
+  "name": "googletranslate-on-cloudflare",
+  "version": "1.0.0",
+  "description": "A Cloudflare Worker that reverse-proxies translate.googleapis.com and returns a standardized JSON interface.",
+  "type": "module",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest run"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "fast-check": "^3.19.0",
+    "vitest": "^2.1.8",
+    "wrangler": "^3.90.0"
+  }
+}

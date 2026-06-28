@@ -1,0 +1,15 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.hypothesis/
+*.egg-info/
+.venv/
+
+# Cloudflare / Wrangler
+.wrangler/
+.kiro/

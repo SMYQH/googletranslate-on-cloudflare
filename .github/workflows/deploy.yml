@@ -1,0 +1,163 @@
+name: CD
+
+# Deploy to production after changes are merged into the default branch.
+# This runs only on push to `main` (i.e. after a PR is merged), so it executes
+# once CI on the pull request has already passed.
+on:
+  push:
+    branches:
+      - main
+  # Allow manually re-running a production deploy from the Actions tab
+  # (useful for redeploying without pushing a new commit).
+  workflow_dispatch:
+
+# Avoid overlapping production deployments.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Worker to production
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      # Optional custom domain. Accepted from either a repository *variable*
+      # (preferred, since a hostname is not sensitive) or a repository *secret*,
+      # whichever is set. Empty when neither is configured.
+      DOMAIN: ${{ vars.DOMAIN || secrets.DOMAIN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Cloudflare credentials
+        # Fail fast and report when the deploy credential is missing/empty so we
+        # never attempt an unauthenticated deployment.
+        run: |
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN secret is missing or empty. Configure it in the repository settings before deploying."
+            exit 1
+          fi
+          echo "CLOUDFLARE_API_TOKEN is present; proceeding with deployment."
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Configure custom domain binding
+        # Optional. When the `DOMAIN` repository variable or secret is set (e.g.
+        # "translate.api.example.com"), bind the Worker to that custom domain
+        # and disable the default *.workers.dev hostname. When `DOMAIN` is
+        # empty/unset, this step is skipped and the Worker keeps its default
+        # workers.dev URL. DOMAIN is inherited from the job-level env.
+        if: ${{ env.DOMAIN != '' }}
+        run: |
+          # Basic hostname validation: letters/digits/hyphens per label, at
+          # least two labels (e.g. example.com). Reject anything unexpected so
+          # we never write a malformed value into wrangler.toml.
+          if ! printf '%s' "${DOMAIN}" | grep -Eq '^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'; then
+            echo "::error::DOMAIN '${DOMAIN}' is not a valid hostname (expected something like translate.api.example.com)."
+            exit 1
+          fi
+
+          {
+            echo ""
+            echo "# Injected by CD workflow from the DOMAIN repository variable/secret."
+            echo "workers_dev = false"
+            echo ""
+            echo "[[routes]]"
+            echo "pattern = \"${DOMAIN}\""
+            echo "custom_domain = true"
+          } >> wrangler.toml
+
+          echo "Bound Worker to custom domain '${DOMAIN}' and disabled workers.dev."
+          echo "----- effective wrangler.toml -----"
+          cat wrangler.toml
+
+      - name: Resolve Cloudflare account ID
+        # Account-scoped API tokens cannot list user memberships, so when
+        # wrangler needs to resolve the account (e.g. to provision a custom
+        # domain) it fails with error 9106. We resolve the account ID up front
+        # and expose it as CLOUDFLARE_ACCOUNT_ID so wrangler skips the
+        # /memberships lookup.
+        #
+        # Resolution order:
+        #   1. CLOUDFLARE_ACCOUNT_ID repository variable, if set (explicit pin).
+        #   2. When DOMAIN is set, the account that owns the matching zone for
+        #      that custom domain (this is the account we actually need).
+        #   3. Otherwise, the first account the token can access.
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          ACCOUNT_ID_OVERRIDE: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          # DOMAIN is inherited from the job-level env (variable or secret).
+        run: |
+          api() {
+            curl -s -H "Authorization: Bearer ${CLOUDFLARE_API_TOKEN}" \
+              -H "Content-Type: application/json" "$1"
+          }
+
+          # 1. Explicit override wins.
+          if [ -n "${ACCOUNT_ID_OVERRIDE}" ]; then
+            echo "Using account ID from the CLOUDFLARE_ACCOUNT_ID repository variable."
+            echo "CLOUDFLARE_ACCOUNT_ID=${ACCOUNT_ID_OVERRIDE}" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          # 2. When a custom domain is configured, find the zone that owns it
+          #    and use that zone's account. The matching zone is the one whose
+          #    name equals the domain or is a parent suffix of it
+          #    (e.g. domain "translate.api.example.com" matches zone
+          #    "example.com").
+          if [ -n "${DOMAIN}" ]; then
+            zones=$(api "https://api.cloudflare.com/client/v4/zones?per_page=50")
+            if [ "$(printf '%s' "$zones" | jq -r '.success')" != "true" ]; then
+              echo "::error::Failed to query Cloudflare zones with the provided token."
+              printf '%s' "$zones" | jq -r '.errors // empty'
+              exit 1
+            fi
+
+            account_id=$(printf '%s' "$zones" | jq -r --arg d "${DOMAIN}" '
+              [ .result[]
+                | select(.name as $n | ($d == $n) or ($d | endswith("." + $n))) ]
+              | sort_by(.name | length) | last | .account.id // empty')
+
+            if [ -n "${account_id}" ] && [ "${account_id}" != "null" ]; then
+              echo "Resolved account ID from the zone that owns custom domain '${DOMAIN}'."
+              echo "CLOUDFLARE_ACCOUNT_ID=${account_id}" >> "$GITHUB_ENV"
+              exit 0
+            fi
+
+            echo "::error::No zone matching custom domain '${DOMAIN}' was found for this token. Make sure the domain's zone is in the same Cloudflare account and the token has access to it."
+            exit 1
+          fi
+
+          # 3. No custom domain: fall back to the first accessible account.
+          response=$(api "https://api.cloudflare.com/client/v4/accounts?per_page=50")
+          if [ "$(printf '%s' "$response" | jq -r '.success')" != "true" ]; then
+            echo "::error::Failed to query Cloudflare accounts with the provided token."
+            printf '%s' "$response" | jq -r '.errors // empty'
+            exit 1
+          fi
+
+          count=$(printf '%s' "$response" | jq -r '.result | length')
+          if [ "$count" -eq 0 ]; then
+            echo "::error::The API token is not associated with any Cloudflare account."
+            exit 1
+          fi
+
+          account_id=$(printf '%s' "$response" | jq -r '.result[0].id')
+          echo "Resolved Cloudflare account ID from the API token."
+          echo "CLOUDFLARE_ACCOUNT_ID=${account_id}" >> "$GITHUB_ENV"
+
+      - name: Deploy to Cloudflare Workers
+        run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # CLOUDFLARE_ACCOUNT_ID is provided by the "Resolve Cloudflare account
+          # ID" step above (via $GITHUB_ENV), either resolved from the token or
+          # taken from the optional repository variable override.
