@@ -2,9 +2,11 @@
 
 [![Cloudflare Workers](https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white)](https://workers.cloudflare.com/)
 [![Python 3.11](https://img.shields.io/badge/Python-3.11-blue?logo=python&logoColor=white)](https://www.python.org/)
-[![CI/CD](https://img.shields.io/badge/GitHub%20Actions-Deploy-2088FF?logo=githubactions&logoColor=white)](./.github/workflows/)
+[![持续集成/持续部署](https://img.shields.io/badge/GitHub%20Actions-Deploy-2088FF?logo=githubactions&logoColor=white)](./.github/workflows/)
 
 基于 Cloudflare Worker 的 Google 翻译无状态反向代理，将 `translate.googleapis.com` 的响应转换为标准化的 JSON 接口，并提供开箱即用的 Python 客户端。
+
+> Google 风控还是十分严格的，此项目暂时没有应对方法。
 
 ## ✨ 核心特性
 
@@ -35,7 +37,7 @@
 | 参数 | 必填 | 类型 | 说明 |
 |------|:----:|------|------|
 | `q` | ✅ | string | 待翻译文本（需 URL 编码） |
-| `tl` | ✅ | string | 目标语言代码（如 `zh-CN`, `en`） |
+| `tl` | ✅ | string | 目标语言代码（如 `zh-CN`， `en`） |
 | `sl` | ❌ | string | 源语言代码（默认 `auto`） |
 | `client` | ✅ | string | 必须为 `gtx` |
 | `dt` | ✅ | string | 必须为 `t` |
